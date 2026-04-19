@@ -4,7 +4,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SpendLens Canada | AI Expense Tracker</title>
-    
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='0.9em' font-size='90'>💸</text></svg>">
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -23,19 +22,36 @@
         
         .spinner { width: 20px; height: 20px; border: 3px solid rgba(255,255,255,0.3); border-radius: 50%; border-top-color: #fff; animation: spin 1s ease-in-out infinite; }
         @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* ✅ CORRIGIDO: altura do gráfico menor em mobile */
+        .chart-container { position: relative; height: 200px; width: 100%; }
+        @media (min-width: 768px) { .chart-container { height: 300px; } }
         
-        /* Containers de gráfico responsivos */
-        .chart-container { position: relative; height: 300px; width: 100%; }
-        
-        /* Esconder scrollbar mas manter funcionalidade */
-        .hide-scrollbar::-webkit-scrollbar { display: none; }
-        .hide-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+        /* ✅ CORRIGIDO: tabela some em mobile, lista aparece */
+        .table-desktop { display: none; }
+        @media (min-width: 640px) { 
+            .table-desktop { display: table; width: 100%; }
+            .list-mobile { display: none; }
+        }
+        .list-mobile { display: block; }
+
+        .row-card { 
+            display: flex; 
+            justify-content: space-between; 
+            align-items: flex-start;
+            padding: 14px 16px; 
+            border-bottom: 1px solid #F3FBF9;
+        }
+        .row-card:last-child { border-bottom: none; }
+        .row-card-label { font-weight: 700; font-size: 14px; color: #1A1A1A; }
+        .row-card-sub { font-size: 11px; color: #94A3B8; margin-top: 2px; }
+        .row-card-amount { font-weight: 700; font-size: 14px; white-space: nowrap; margin-left: 8px; padding-top: 1px; }
     </style>
 </head>
 <body class="text-[#1A1A1A] antialiased pb-20 px-4">
 
     <header class="text-center py-10 md:py-16">
-        <h1 class="text-3xl md:text-4xl font-extrabold tracking-tighter mb-2">💸 SpendLens?</h1>
+        <h1 class="text-3xl md:text-4xl font-extrabold tracking-tighter mb-2">💸 SpendLens</h1>
         <p class="text-slate-500 max-w-sm mx-auto text-xs md:text-sm font-medium uppercase tracking-widest">Canada AI Analytics</p>
     </header>
 
@@ -68,6 +84,7 @@
 
         <section id="results" class="space-y-6 md:space-y-10 hidden">
             
+            <!-- ✅ INCOME TABLE -->
             <div class="main-card overflow-hidden border-2 border-[#BEE3D8]">
                 <div class="px-6 py-5 summary-header flex flex-col md:flex-row justify-between items-center gap-2">
                     <h3 class="text-lg font-extrabold flex items-center gap-3 text-slate-900">
@@ -75,8 +92,13 @@
                     </h3>
                     <span class="text-[10px] bg-[#E6F7F1] text-[#3D967E] px-3 py-1 rounded-full font-bold uppercase tracking-widest italic">Deposits Only</span>
                 </div>
-                <div class="overflow-x-auto hide-scrollbar">
-                    <table class="w-full text-left min-w-[500px]">
+
+                <!-- Mobile: lista de cards -->
+                <div id="incomeMobile" class="list-mobile divide-y divide-gray-50"></div>
+
+                <!-- Desktop: tabela tradicional -->
+                <div class="hidden sm:block overflow-x-auto">
+                    <table class="table-desktop text-left">
                         <thead>
                             <tr class="text-[10px] uppercase tracking-widest text-slate-400 border-b border-gray-100 bg-gray-50/50">
                                 <th class="px-6 py-4">Source</th>
@@ -85,16 +107,16 @@
                             </tr>
                         </thead>
                         <tbody id="incomeTableBody" class="divide-y divide-gray-50 text-sm"></tbody>
-                        <tfoot>
-                            <tr class="bg-[#F8FDFB] font-black text-xl border-t-2 border-[#BEE3D8]">
-                                <td colspan="2" class="px-6 py-6 text-right text-[10px] uppercase text-slate-400 tracking-wider">Total Income:</td>
-                                <td id="totalIncome" class="px-6 py-6 text-right text-[#3D967E] font-extrabold">$ 0.00</td>
-                            </tr>
-                        </tfoot>
                     </table>
+                </div>
+
+                <div class="bg-[#F8FDFB] border-t-2 border-[#BEE3D8] px-6 py-5 flex justify-between items-center">
+                    <span class="text-[10px] uppercase text-slate-400 tracking-wider font-bold">Total Income</span>
+                    <span id="totalIncome" class="text-[#3D967E] font-extrabold text-lg">$ 0.00</span>
                 </div>
             </div>
 
+            <!-- ✅ CHARTS: empilhados em mobile, lado a lado no desktop -->
             <div class="grid grid-cols-1 md:grid-cols-2 gap-6 md:gap-8">
                 <div class="main-card p-6 md:p-8">
                     <h3 class="text-[10px] font-bold uppercase tracking-widest text-slate-400 mb-6 text-center">Category Distribution</h3>
@@ -110,13 +132,19 @@
                 </div>
             </div>
 
+            <!-- ✅ SPENDING TABLE -->
             <div class="main-card overflow-hidden">
                 <div class="px-6 py-5 summary-header flex justify-between items-center">
-                    <h3 class="font-extrabold text-lg tracking-tight text-slate-900 text-sm md:text-lg">📝 Spending Summary</h3>
-                    <span class="text-[8px] md:text-[10px] bg-red-50 text-red-600 px-3 py-1 rounded-full font-bold uppercase">AI Verified</span>
+                    <h3 class="font-extrabold text-base md:text-lg tracking-tight text-slate-900">📝 Spending Summary</h3>
+                    <span class="text-[10px] bg-red-50 text-red-600 px-3 py-1 rounded-full font-bold uppercase">AI Verified</span>
                 </div>
-                <div class="overflow-x-auto hide-scrollbar">
-                    <table class="w-full text-left min-w-[500px]">
+
+                <!-- Mobile: lista de cards -->
+                <div id="spendingMobile" class="list-mobile divide-y divide-gray-50"></div>
+
+                <!-- Desktop: tabela -->
+                <div class="hidden sm:block overflow-x-auto">
+                    <table class="table-desktop text-left">
                         <thead>
                             <tr class="text-[10px] uppercase tracking-widest text-slate-400 border-b border-gray-50">
                                 <th class="px-6 py-4">Category</th>
@@ -125,13 +153,12 @@
                             </tr>
                         </thead>
                         <tbody id="summaryTableBody" class="divide-y divide-gray-50 text-sm"></tbody>
-                        <tfoot>
-                            <tr class="bg-[#FDF3F3] font-black text-xl">
-                                <td colspan="2" class="px-6 py-6 text-right text-[10px] uppercase text-slate-400 tracking-wider">Total Expenses:</td>
-                                <td id="totalExpenses" class="px-6 py-6 text-right text-red-500 font-extrabold">$ 0.00</td>
-                            </tr>
-                        </tfoot>
                     </table>
+                </div>
+
+                <div class="bg-[#FDF3F3] border-t px-6 py-5 flex justify-between items-center">
+                    <span class="text-[10px] uppercase text-slate-400 tracking-wider font-bold">Total Expenses</span>
+                    <span id="totalExpenses" class="text-red-500 font-extrabold text-lg">$ 0.00</span>
                 </div>
             </div>
 
@@ -143,7 +170,6 @@
     </main>
 
     <script>
-        // Scripts originais mantidos, apenas chamadas de renderização ajustadas para responsividade
         const csvInput = document.getElementById('csvInput');
         const fileList = document.getElementById('fileList');
         const btnAnalyze = document.getElementById('btnAnalyze');
@@ -161,6 +187,8 @@
                 fileList.classList.remove('hidden');
             }
         });
+
+        const fmt = (n) => `$ ${Number(n).toLocaleString('en-CA', {minimumFractionDigits: 2})}`;
 
         async function processFiles() {
             const files = csvInput.files;
@@ -202,24 +230,45 @@
         function renderResults(data) {
             resultsSection.classList.remove('hidden');
             
-            // Income Table
+            // ✅ Income: tabela desktop + cards mobile
             document.getElementById('incomeTableBody').innerHTML = data.income_sources.map(item => `
                 <tr class="hover:bg-[#F9FBFA] transition-colors">
                     <td class="px-6 py-5 font-bold text-slate-900">${item.source}</td>
                     <td class="px-6 py-5 text-slate-500">${item.description}</td>
-                    <td class="px-6 py-5 text-right font-bold text-[#3D967E]">$ ${Number(item.amount).toLocaleString('en-CA', {minimumFractionDigits: 2})}</td>
+                    <td class="px-6 py-5 text-right font-bold text-[#3D967E]">${fmt(item.amount)}</td>
                 </tr>`).join('');
-            document.getElementById('totalIncome').innerText = `$ ${Number(data.total_income).toLocaleString('en-CA', {minimumFractionDigits: 2})}`;
 
-            // Spending Table
+            document.getElementById('incomeMobile').innerHTML = data.income_sources.map(item => `
+                <div class="row-card">
+                    <div>
+                        <div class="row-card-label">${item.source}</div>
+                        <div class="row-card-sub">${item.description}</div>
+                    </div>
+                    <div class="row-card-amount text-[#3D967E]">${fmt(item.amount)}</div>
+                </div>`).join('');
+
+            document.getElementById('totalIncome').innerText = fmt(data.total_income);
+
+            // ✅ Spending: tabela desktop + cards mobile
             const sortedSpending = data.spending_summary.sort((a, b) => b.amount - a.amount);
+
             document.getElementById('summaryTableBody').innerHTML = sortedSpending.map(item => `
                 <tr class="hover:bg-red-50/30">
                     <td class="px-6 py-5 font-bold text-slate-900"><span class="mr-2">${item.emoji || '💰'}</span>${item.category}</td>
                     <td class="px-6 py-5 text-xs text-slate-400 italic">${item.description}</td>
-                    <td class="px-6 py-5 text-right font-bold text-red-500">$ ${Number(item.amount).toLocaleString('en-CA', {minimumFractionDigits: 2})}</td>
+                    <td class="px-6 py-5 text-right font-bold text-red-500">${fmt(item.amount)}</td>
                 </tr>`).join('');
-            document.getElementById('totalExpenses').innerText = `$ ${Number(data.total_expenses).toLocaleString('en-CA', {minimumFractionDigits: 2})}`;
+
+            document.getElementById('spendingMobile').innerHTML = sortedSpending.map(item => `
+                <div class="row-card">
+                    <div>
+                        <div class="row-card-label">${item.emoji || '💰'} ${item.category}</div>
+                        <div class="row-card-sub">${item.description}</div>
+                    </div>
+                    <div class="row-card-amount text-red-500">${fmt(item.amount)}</div>
+                </div>`).join('');
+
+            document.getElementById('totalExpenses').innerText = fmt(data.total_expenses);
             
             // Advice
             document.getElementById('anomalyContent').innerHTML = data.deep_dive.map(text => `<p>● ${text}</p>`).join('');
