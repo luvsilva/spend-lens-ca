@@ -4,16 +4,14 @@
 
 // ── Import Modal ──────────────────────────────────────────────
 function openReviewImportModalV5() {
-  // IMPORTANT:
-  // Do NOT call buildModalHTML() here because older files in Apps Script may also
-  // define buildModalHTML() and override this one.
-  // This unique function name guarantees the new Review Import modal opens.
-  const html = HtmlService
-    .createHtmlOutputFromFile('Modal')
+  const combined = getCombinedFormatsData();
+  const tpl = HtmlService.createTemplateFromFile('Modal');
+  tpl.initialFormats       = JSON.stringify(combined.formats       || []);
+  tpl.initialHiddenBuiltins = JSON.stringify(combined.hiddenBuiltins || []);
+  const html = tpl.evaluate()
     .setSandboxMode(HtmlService.SandboxMode.IFRAME)
     .setWidth(1120)
     .setHeight(760);
-
   SpreadsheetApp.getUi().showModalDialog(html, "💰 Budget Importer — Review Before Import");
 }
 
@@ -1397,7 +1395,11 @@ function parseDynamicDate_(str, format) {
 
 // ── Modal HTML ────────────────────────────────────────────────
 function buildReviewImportModalHTML_() {
-  return HtmlService.createHtmlOutputFromFile('Modal').getContent();
+  const combined = getCombinedFormatsData();
+  const tpl = HtmlService.createTemplateFromFile('Modal');
+  tpl.initialFormats        = JSON.stringify(combined.formats       || []);
+  tpl.initialHiddenBuiltins = JSON.stringify(combined.hiddenBuiltins || []);
+  return tpl.evaluate().getContent();
 }
 
 // Compatibility wrapper.

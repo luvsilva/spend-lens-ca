@@ -114,7 +114,7 @@ tr.excluded{opacity:.50;background:#f8fafc;} tr.duplicate{opacity:.62;background
 <h2>📂 Import Bank File — Review Mode</h2>
 <div class="subtitle">Choose your bank, or click <b>＋ New Format</b> to register a new CSV layout. Max 7 formats total (3 built-in + 4 custom).</div>
 
-<div class="banks" id="banksContainer" style="visibility:hidden">
+<div class="banks" id="banksContainer">
   <button type="button" class="bank-btn" id="btn-Amex" onclick="selectBank('Amex')"><span class="name">💳 Amex</span><span class="del-fmt" onclick="event.stopPropagation();deleteBuiltinBank('Amex')" title="Hide">x</span></button>
   <button type="button" class="bank-btn new-fmt" id="btn-new" onclick="openNewFormatInput()"><span class="name">+ New Format</span></button>
 </div>
@@ -267,7 +267,8 @@ tr.excluded{opacity:.50;background:#f8fafc;} tr.duplicate{opacity:.62;background
   var amexParsedRows = null;
   var reviewRows = [];
   var categoryOptions = [];
-  var customFormats = [];
+  var customFormats = <?= initialFormats ?>;
+  var _hiddenBuiltins = <?= initialHiddenBuiltins ?>;
   var setupCsvHeaders = [];
   var setupCsvSampleRows = [];
   var setupFile = null;
@@ -296,20 +297,13 @@ tr.excluded{opacity:.50;background:#f8fafc;} tr.duplicate{opacity:.62;background
       .hideBuiltinBank(name);
   }
 
-  google.script.run
-    .withSuccessHandler(function(res) {
-      if (!res || !res.ok) { document.getElementById('banksContainer').style.visibility = ''; return; }
-      var hidden = res.hiddenBuiltins || [];
-      hidden.forEach(function(name) {
-        var btn = document.getElementById('btn-' + name);
-        if (btn) btn.remove();
-      });
-      customFormats = res.formats || [];
-      if (customFormats.length > 0) renderBankButtons();
-      document.getElementById('banksContainer').style.visibility = '';
-    })
-    .withFailureHandler(function(){ document.getElementById('banksContainer').style.visibility = ''; })
-    .getCombinedFormatsData();
+  setTimeout(function() {
+    (_hiddenBuiltins || []).forEach(function(name) {
+      var btn = document.getElementById('btn-' + name);
+      if (btn) btn.remove();
+    });
+    renderBankButtons();
+  }, 0);
 
   // Drag & Drop (cannot be inline)
   (function() {
