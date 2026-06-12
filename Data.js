@@ -1371,7 +1371,7 @@ function parseDynamicCsv_(csvText, fmt) {
       if (rawAmt <= 0) return;
       amount = rawAmt;
     }
-    out.push({ date: date, desc: cleanDesc(desc), amount: amount, source: String(fmt.name||"Custom") });
+    out.push({ date: date, desc: cleanDesc(desc), amount: amount, source: String(fmt.name||"Custom").replace(/[^\w\s]/g, "").replace(/\s{2,}/g, " ").trim() });
   });
   return cancelReturns(out);
 }
