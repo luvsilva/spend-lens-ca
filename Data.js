@@ -1296,11 +1296,13 @@ function saveCsvFormat(config) {
       for (let i = 0; i < data.length; i++) {
         if (String(data[i][0]||"").trim() === name) {
           sh.getRange(i+2,1,1,7).setValues([row]);
+          invalidateCsvFormatsCache_();
           return { ok: true, updated: true };
         }
       }
     }
     sh.appendRow(row);
+    invalidateCsvFormatsCache_();
     return { ok: true, updated: false };
   } catch(e) {
     return { ok: false, error: e.message };
@@ -1313,20 +1315,33 @@ function hideBuiltinBank(name) {
     if (!n) return { ok: false, error: "Name required." };
     const props = PropertiesService.getUserProperties();
     const hidden = JSON.parse(props.getProperty('hiddenBuiltins') || '[]');
-    if (!hidden.includes(n)) { hidden.push(n); props.setProperty('hiddenBuiltins', JSON.stringify(hidden)); }
+    if (!hidden.includes(n)) { hidden.push(n); props.setProperty('hiddenBuiltins', JSON.stringify(hidden)); invalidateCsvFormatsCache_(); }
     return { ok: true };
   } catch(e) {
     return { ok: false, error: e.message };
   }
 }
 
+const CSV_FORMATS_CACHE_KEY = 'combinedFormatsData_v1';
+const CSV_FORMATS_CACHE_TTL = 3600;
+
+function invalidateCsvFormatsCache_() {
+  try { CacheService.getScriptCache().remove(CSV_FORMATS_CACHE_KEY); } catch(e) {}
+}
+
 function getCombinedFormatsData() {
   try {
+    const cache = CacheService.getScriptCache();
+    const cached = cache.get(CSV_FORMATS_CACHE_KEY);
+    if (cached) return JSON.parse(cached);
+
     seedBuiltinCsvFormats();
     const props = PropertiesService.getUserProperties();
     const hidden = JSON.parse(props.getProperty('hiddenBuiltins') || '[]');
     const customRes = getCsvFormats();
-    return { ok: true, formats: customRes.formats || [], hiddenBuiltins: hidden };
+    const result = { ok: true, formats: customRes.formats || [], hiddenBuiltins: hidden };
+    try { cache.put(CSV_FORMATS_CACHE_KEY, JSON.stringify(result), CSV_FORMATS_CACHE_TTL); } catch(e) {}
+    return result;
   } catch(e) {
     return { ok: true, formats: [], hiddenBuiltins: [] };
   }
@@ -1342,6 +1357,7 @@ function deleteCsvFormat(name) {
     for (let i = 0; i < data.length; i++) {
       if (String(data[i][0]||"").trim() === n) {
         sh.deleteRow(i+2);
+        invalidateCsvFormatsCache_();
         return { ok: true, deleted: true };
       }
     }
