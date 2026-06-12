@@ -403,8 +403,8 @@ tr.excluded{opacity:.50;background:#f8fafc;} tr.duplicate{opacity:.62;background
     var name = currentEmoji + ' ' + rawName;
     var errEl = document.getElementById('newFormatError');
     if (!rawName) { errEl.textContent = 'Please enter a bank name.'; return; }
-    if (['CIBC','Amex','Tangerine'].some(function(r){ return rawName.toLowerCase() === r.toLowerCase(); })) { errEl.textContent = '"' + rawName + '" is reserved.'; return; }
-    if (customFormats.some(function(f){ return f.name === name; })) { errEl.textContent = '"' + name + '" already exists.'; return; }
+    var nameCore = rawName.replace(/[^\w\s]/g, '').trim().toLowerCase();
+    if (customFormats.some(function(f){ return f.name.replace(/[^\w\s]/g, '').trim().toLowerCase() === nameCore; })) { errEl.textContent = '"' + rawName + '" already exists.'; return; }
     cancelNewFormatInput();
     openSetupPanel(name);
   }
