@@ -1,0 +1,12 @@
+# Personal data — never commit
+activity.csv
+*.csv
+
+# Clasp config — contains private script ID
+.clasp.json
+
+# macOS
+.DS_Store
+
+# Claude Code project instructions (optional — remove this line if you want to share)
+CLAUDE.md
