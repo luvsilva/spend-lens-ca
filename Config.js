@@ -162,6 +162,8 @@ const CONFIG = {
 function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu("💰 Budget Importer")
+    .addItem("📊 Open Dashboard",                "openDashboard")
+    .addSeparator()
     .addItem("📂 Import Bank File",               "openReviewImportModalV5")
     .addSeparator()
     .addItem("🔄 Re-categorize uncategorized",    "recategorizeUncategorized")
@@ -173,4 +175,5 @@ function onOpen() {
     .addSeparator()
     .addItem("📤 Export Clean Template",          "exportCleanTemplate")
     .addToUi();
+  ensureCategoryRulesSeeded_();
 }

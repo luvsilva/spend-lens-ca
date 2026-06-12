@@ -244,6 +244,18 @@ function getImportCategories_() {
 
   try {
     const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const rs = ss.getSheetByName(CONFIG.RULES_SHEET);
+    if (rs && rs.getLastRow() > 1) {
+      const skipPfx = ['─','—','➕','ℹ','#','=','—','✍'];
+      rs.getRange(2, 2, rs.getLastRow() - 1, 1).getValues().forEach(function(r) {
+        const c = String(r[0] || "").trim();
+        if (c && !CONFIG.INCOME_CATEGORIES.includes(c) && !skipPfx.some(function(p){ return c.startsWith(p); })) set.add(c);
+      });
+    }
+  } catch (e) {}
+
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
     const sheet = ss.getSheetByName(CONFIG.TARGET_SHEET);
     if (sheet && sheet.getLastRow() > 1) {
       const vals = sheet.getRange(2, CONFIG.COLS.CATEGORY, sheet.getLastRow() - 1, 1).getValues();
@@ -570,12 +582,13 @@ function showSummary() {
 
 // ── Categorização híbrida ─────────────────────────────────────
 function loadCategoryRules() {
+  ensureCategoryRulesSeeded_();
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const rs = ss.getSheetByName(CONFIG.RULES_SHEET);
   if (!rs || rs.getLastRow() < 2) return [];
   const data = rs.getRange(2, 1, rs.getLastRow()-1, 2).getValues();
   const rules = [];
-  const skipPrefixes = ['─','—','➕','ℹ','#','=','—'];
+  const skipPrefixes = ['─','—','➕','ℹ','#','=','—','✍'];
   data.forEach(function(row) {
     const keyword  = String(row[0]||"").trim();
     const category = String(row[1]||"").trim();
@@ -608,6 +621,23 @@ function setupCategoryRulesSheet() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
 
   let rs = ss.getSheetByName(CONFIG.RULES_SHEET);
+
+  // Preserve custom/learned rules before clearing
+  const preservedCustom = [];
+  if (rs && rs.getLastRow() >= 2) {
+    const data = rs.getRange(2, 1, rs.getLastRow() - 1, 2).getValues();
+    const skipPrefixes_ = ['─','—','➕','ℹ','#','=','✍'];
+    let inCustom = false;
+    data.forEach(function(row) {
+      const kw  = String(row[0] || '').trim();
+      const cat = String(row[1] || '').trim();
+      if (kw.startsWith('✍')) { inCustom = true; return; }
+      if (!inCustom || !kw || !cat) return;
+      if (skipPrefixes_.some(function(p) { return kw.startsWith(p); })) return;
+      preservedCustom.push({ keyword: kw, category: cat });
+    });
+  }
+
   if (rs) { rs.clearContents(); rs.clearFormats(); }
   else     { rs = ss.insertSheet(CONFIG.RULES_SHEET); }
 
@@ -647,7 +677,6 @@ function setupCategoryRulesSheet() {
     "Driver School":"🚗","BCLiquor":"🍷","Transfer":"💸","Cash Withdrawal":"💵"
   };
 
-  // Alternating row colors per group for visual separation
   const ROW_COLORS = ["#ffffff","#f8fafc"];
   const SECTION_BG = "#e2e8f0";
   const SECTION_FG = "#334155";
@@ -659,7 +688,6 @@ function setupCategoryRulesSheet() {
     const emoji    = EMOJIS[cat] || "📌";
     const rowColor = ROW_COLORS[gi % 2];
 
-    // Section header (merged across both columns)
     rs.getRange(row, 1, 1, 2).merge()
       .setValue(emoji + "   " + cat.toUpperCase())
       .setBackground(SECTION_BG).setFontColor(SECTION_FG)
@@ -667,17 +695,38 @@ function setupCategoryRulesSheet() {
     rs.setRowHeight(row, 26);
     row++;
 
-    // Keyword rows — batch write for performance
     const vals = keywords.map(function(kw) { return [kw, cat]; });
     rs.getRange(row, 1, vals.length, 2).setValues(vals)
       .setBackground(rowColor).setFontSize(11);
     row += vals.length;
   });
 
+  // Learn new rules and merge with preserved custom rules
+  const learnedRules = learnNewCategoryRules_(preservedCustom);
+  const allCustom = mergeCustomRules_(preservedCustom, learnedRules);
+
+  // CUSTOM & LEARNED section header (always present so the user knows where to add rules)
+  rs.getRange(row, 1, 1, 2).merge()
+    .setValue("✍  CUSTOM & LEARNED RULES")
+    .setBackground("#fef3c7").setFontColor("#92400e")
+    .setFontWeight("bold").setFontSize(10).setVerticalAlignment("middle");
+  rs.setRowHeight(row, 26);
+  row++;
+
+  if (allCustom.length > 0) {
+    const vals = allCustom.map(function(r) { return [r.keyword, r.category]; });
+    rs.getRange(row, 1, vals.length, 2).setValues(vals)
+      .setBackground("#fffbeb").setFontSize(11);
+  }
+
   rs.setColumnWidth(1, 300);
   rs.setColumnWidth(2, 190);
   if (rs.isSheetHidden()) rs.showSheet();
   ss.setActiveSheet(rs);
+
+  if (learnedRules.length > 0) {
+    ss.toast(learnedRules.length + ' new rule(s) learned from your transaction history.', '🧠 Rules Updated', 5);
+  }
 }
 
 function toggleCategoryRulesSheet() {
@@ -687,6 +736,141 @@ function toggleCategoryRulesSheet() {
   setupCategoryRulesSheet();
 }
 
+// Scans Expenses_Form for transactions with a category that no existing rule covers.
+// Returns an array of { keyword, category } for consistent new rules only.
+function learnNewCategoryRules_(existingCustomRules) {
+  const knownKeywords = new Set();
+  (CONFIG.CATEGORIES || []).forEach(function(rule) {
+    (rule.match || []).forEach(function(kw) { knownKeywords.add(kw.toUpperCase()); });
+  });
+  (existingCustomRules || []).forEach(function(r) { knownKeywords.add(r.keyword.toUpperCase()); });
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const expSheet = ss.getSheetByName(CONFIG.TARGET_SHEET);
+  if (!expSheet || expSheet.getLastRow() < 2) return [];
+
+  const data = expSheet.getRange(2, CONFIG.COLS.DESCRIPTION, expSheet.getLastRow() - 1, 2).getValues();
+  const tokenCatMap = {};
+
+  data.forEach(function(row) {
+    const desc = String(row[0] || '').trim();
+    const cat  = String(row[1] || '').trim();
+    if (!desc || !cat) return;
+    if (CONFIG.INCOME_CATEGORIES.includes(cat)) return;
+
+    const upper = desc.toUpperCase();
+    const alreadyMatched =
+      (CONFIG.CATEGORIES || []).some(function(rule) {
+        return (rule.match || []).some(function(kw) { return upper.includes(kw.toUpperCase()); });
+      }) ||
+      (existingCustomRules || []).some(function(r) { return upper.includes(r.keyword.toUpperCase()); });
+    if (alreadyMatched) return;
+
+    const tokens = extractMeaningfulTokens(desc);
+    const single = tokens.filter(function(t) { return !t.includes(' ') && t.length >= 4; });
+    const candidates = single.length > 0 ? single : tokens.filter(function(t) { return !t.includes(' '); });
+    if (candidates.length === 0) return;
+    const token = candidates[0];
+
+    if (!tokenCatMap[token]) tokenCatMap[token] = {};
+    tokenCatMap[token][cat] = (tokenCatMap[token][cat] || 0) + 1;
+  });
+
+  const learned = [];
+  Object.keys(tokenCatMap).forEach(function(token) {
+    const cats = Object.keys(tokenCatMap[token]);
+    if (cats.length !== 1) return; // ambiguous — skip
+    if (knownKeywords.has(token.toUpperCase())) return;
+    learned.push({ keyword: token, category: cats[0] });
+  });
+  return learned;
+}
+
+// Merges preserved + learned arrays, deduplicating by keyword (case-insensitive).
+function mergeCustomRules_(existing, learned) {
+  const seen = new Set((existing || []).map(function(r) { return r.keyword.toUpperCase(); }));
+  const merged = (existing || []).slice();
+  (learned || []).forEach(function(r) {
+    if (!seen.has(r.keyword.toUpperCase())) {
+      merged.push(r);
+      seen.add(r.keyword.toUpperCase());
+    }
+  });
+  return merged;
+}
+
+// Seeds the CategoryRules sheet once from CONFIG.CATEGORIES if the sheet does not yet exist.
+// Idempotent: does nothing if the sheet already exists.
+function ensureCategoryRulesSeeded_() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (ss.getSheetByName(CONFIG.RULES_SHEET)) return;
+
+  const rs = ss.insertSheet(CONFIG.RULES_SHEET);
+
+  rs.getRange(1,1,1,2)
+    .setValues([["Keyword  —  matches text in your transaction description","Category  —  label applied in the spreadsheet"]])
+    .setBackground("#1e293b").setFontColor("#ffffff").setFontWeight("bold").setFontSize(11);
+  rs.setRowHeight(1, 32);
+
+  rs.getRange(2,1,1,2).merge()
+    .setValue("ℹ️   To hide this sheet: Budget Importer menu  →  📋 Category Rules")
+    .setBackground("#e0f2fe").setFontColor("#0369a1").setFontStyle("italic")
+    .setHorizontalAlignment("left").setVerticalAlignment("middle");
+  rs.setRowHeight(2, 26);
+  rs.setFrozenRows(2);
+
+  const grouped = {}, order = [];
+  (CONFIG.CATEGORIES || []).forEach(function(rule) {
+    if (!grouped[rule.category]) { grouped[rule.category] = []; order.push(rule.category); }
+    (rule.match || []).forEach(function(kw) { grouped[rule.category].push(kw); });
+  });
+
+  const EMOJIS_S = {
+    "Groceries":"🛒","Restaurant":"🍽","Fast Food":"🍔","Coffee Shop":"☕",
+    "GAS":"⛽","Streamming":"📺","GYM":"🏋","Supplements":"💊",
+    "Mobile":"📱","Internet":"🌐","BCHydro":"💡","Car Payment":"🚗",
+    "Appartament Rent":"🏠","Fees":"💸","Banking Fees":"🏦","ICBC":"🛡",
+    "Car Insurance":"🛡","Parking":"🅿","Public Transportation":"🚌",
+    "Private Transportation":"🚕","Car Maintenance":"🔧","Clothes":"👕",
+    "SkinCare":"✨","Pharmacy":"💊","Health":"🏥","Dental":"🦷",
+    "House Maintanence":"🏡","Dog Food":"🐕","Vacation":"✈",
+    "Leisure":"🎭","Night Club":"🎉","BarberShop":"✂",
+    "Tax Return":"📊","Rent Insurance":"🏠","Courses":"📚",
+    "Driver School":"🚗","BCLiquor":"🍷","Transfer":"💸","Cash Withdrawal":"💵"
+  };
+
+  const ROW_COLORS_S = ["#ffffff","#f8fafc"];
+  const SECTION_BG_S = "#e2e8f0", SECTION_FG_S = "#334155";
+  let row = 3;
+
+  order.forEach(function(cat, gi) {
+    const keywords = grouped[cat];
+    if (!keywords || keywords.length === 0) return;
+    const emoji = EMOJIS_S[cat] || "📌";
+    const rowColor = ROW_COLORS_S[gi % 2];
+
+    rs.getRange(row, 1, 1, 2).merge()
+      .setValue(emoji + "   " + cat.toUpperCase())
+      .setBackground(SECTION_BG_S).setFontColor(SECTION_FG_S)
+      .setFontWeight("bold").setFontSize(10).setVerticalAlignment("middle");
+    rs.setRowHeight(row, 26);
+    row++;
+
+    const vals = keywords.map(function(kw) { return [kw, cat]; });
+    rs.getRange(row, 1, vals.length, 2).setValues(vals).setBackground(rowColor).setFontSize(11);
+    row += vals.length;
+  });
+
+  rs.getRange(row, 1, 1, 2).merge()
+    .setValue("✍  CUSTOM & LEARNED RULES")
+    .setBackground("#fef3c7").setFontColor("#92400e")
+    .setFontWeight("bold").setFontSize(10).setVerticalAlignment("middle");
+  rs.setRowHeight(row, 26);
+
+  rs.setColumnWidth(1, 300);
+  rs.setColumnWidth(2, 190);
+  rs.hideSheet();
+}
 function extractMeaningfulTokens(desc) {
   const cleaned = desc
     .replace(/^(Point of Sale\s*-\s*Interac\s*RETAIL PURCHASE\s*\d*\s*)/i,"")
@@ -1213,662 +1397,10 @@ function parseDynamicDate_(str, format) {
 
 // ── Modal HTML ────────────────────────────────────────────────
 function buildReviewImportModalHTML_() {
-  return `<!DOCTYPE html>
-<html><head><meta charset="UTF-8">
-<script async src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"><\/script>
-<style>
-*{box-sizing:border-box;margin:0;padding:0;}
-body{font-family:'Google Sans',Arial,sans-serif;background:#f8fafc;padding:18px;color:#0f172a;font-size:13px;}
-h2{font-size:18px;font-weight:700;color:#4338ca;margin-bottom:6px;}
-.subtitle{font-size:12px;color:#64748b;margin-bottom:14px;line-height:1.4;}
-.banks{display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap;align-items:center;}
-.bank-btn{flex:1;min-width:72px;padding:9px 8px;border:2px solid #e2e8f0;border-radius:12px;background:#fff;cursor:pointer;text-align:center;transition:all .15s;box-shadow:0 1px 2px rgba(15,23,42,.04);font-family:inherit;font-size:13px;display:inline-flex;align-items:center;justify-content:center;gap:4px;}
-.bank-btn:hover{border-color:#6366f1;background:#eef2ff;}
-.bank-btn.active{border-color:#4f46e5;background:#eef2ff;color:#4338ca;}
-.bank-btn .name{font-weight:700;font-size:12px;}
-.bank-btn.custom-fmt{border-color:#c7d2fe;}
-.bank-btn.custom-fmt.active{border-color:#4f46e5;background:#e0e7ff;}
-.bank-btn.new-fmt{border-color:#86efac;background:#f0fdf4;color:#166534;flex:none;}
-.bank-btn.new-fmt:hover{border-color:#4ade80;background:#dcfce7;}
-.del-fmt{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:rgba(239,68,68,.15);color:#ef4444;font-size:11px;font-weight:900;margin-left:4px;flex-shrink:0;line-height:1;cursor:pointer;}
-.del-fmt:hover{background:#ef4444;color:#fff;}
-.name-input-row{display:none;align-items:center;gap:8px;margin-bottom:12px;background:#f0fdf4;border:1px solid #86efac;border-radius:10px;padding:10px 14px;flex-wrap:wrap;}
-.name-input-row label{font-size:12px;font-weight:700;color:#166534;white-space:nowrap;}
-.name-input-row input{flex:1;min-width:180px;max-width:280px;padding:8px 12px;border:1px solid #86efac;border-radius:8px;font-size:13px;outline:none;background:#fff;}
-.name-input-row input:focus{border-color:#22c55e;box-shadow:0 0 0 3px rgba(34,197,94,.1);}
-.dropzone{border:2px dashed #cbd5e1;border-radius:16px;background:#fff;padding:28px 20px;text-align:center;cursor:pointer;transition:all .15s;margin-bottom:12px;position:relative;box-shadow:0 8px 24px rgba(15,23,42,.05);}
-.dropzone.drag{border-color:#4f46e5;background:#eef2ff;transform:scale(1.005);}
-.dropzone:hover{border-color:#4f46e5;background:#eef2ff;}
-.dropzone input[type=file]{display:none;}
-.file-selected{display:none;align-items:center;gap:10px;background:#f0fdf4;border:1px solid #86efac;border-radius:10px;padding:10px 14px;margin-bottom:12px;}
-.fs-name{font-weight:600;color:#166534;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-.fs-remove{cursor:pointer;color:#64748b;font-size:16px;border:none;background:none;}
-.actions{display:flex;align-items:center;gap:10px;margin-top:12px;flex-wrap:wrap;}
-.btn{padding:10px 16px;border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;transition:all .15s;}
-.btn-primary{background:#4f46e5;color:#fff;} .btn-primary:hover{background:#4338ca;}
-.btn-secondary{background:#e2e8f0;color:#0f172a;} .btn-secondary:hover{background:#cbd5e1;}
-.btn-danger{background:#fee2e2;color:#991b1b;}
-.btn-success{background:#dcfce7;color:#166534;border:1px solid #86efac;} .btn-success:hover{background:#bbf7d0;}
-.btn:disabled{background:#94a3b8;color:#fff;cursor:not-allowed;}
-#status{font-size:13px;flex:1;min-width:200px;}
-.ok{color:#16a34a;font-weight:700;}.err{color:#ef4444;font-weight:700;}.inf{color:#4f46e5;font-weight:700;}.warn{color:#d97706;font-weight:700;}
-/* ── Setup Panel ── */
-.setup-panel{background:#fff;border:1px solid #c7d2fe;border-radius:16px;padding:16px;margin-bottom:12px;box-shadow:0 4px 16px rgba(79,70,229,.08);}
-.setup-hdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;}
-.setup-title{font-size:15px;font-weight:800;color:#4338ca;}
-.setup-row{margin-bottom:12px;}
-.setup-label{font-size:11px;font-weight:700;color:#475569;display:block;margin-bottom:4px;text-transform:uppercase;letter-spacing:.04em;}
-.setup-input{width:100%;padding:9px 12px;border:1px solid #cbd5e1;border-radius:10px;font-size:13px;background:#fff;outline:none;}
-.setup-input:focus{border-color:#4f46e5;box-shadow:0 0 0 3px rgba(79,70,229,.1);}
-.setup-dropzone{border:2px dashed #c7d2fe;border-radius:12px;background:#eef2ff;padding:18px;text-align:center;cursor:pointer;position:relative;margin-bottom:12px;}
-.setup-dropzone input[type=file]{position:absolute;inset:0;opacity:0;cursor:pointer;width:100%;height:100%;}
-.setup-dropzone:hover{border-color:#4f46e5;background:#e0e7ff;}
-/* ── Mapping UI ── */
-.mapping-wrap{display:flex;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;margin-bottom:14px;}
-.map-col-left{flex:0 0 148px;background:#f8fafc;border-right:1px solid #e2e8f0;}
-.map-col-arrow{flex:0 0 42px;background:#f1f5f9;border-right:1px solid #e2e8f0;display:flex;flex-direction:column;}
-.map-col-right{flex:1;background:#fff;}
-.map-col-hdr{padding:8px 12px;background:#4f46e5;color:#fff;font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:.05em;min-height:34px;display:flex;align-items:center;}
-.map-field-row{display:flex;align-items:center;padding:10px 12px;border-bottom:1px solid #f1f5f9;min-height:60px;}
-.map-field-row:last-child{border-bottom:none;}
-.map-arrow-row{display:flex;align-items:center;justify-content:center;min-height:60px;border-bottom:1px solid #f1f5f9;font-size:18px;color:#4f46e5;font-weight:900;}
-.map-arrow-row:last-child{border-bottom:none;}
-.map-field-inner{display:flex;flex-direction:column;gap:2px;}
-.map-field-name{font-weight:700;font-size:12px;color:#1e293b;}
-.map-field-req{color:#ef4444;font-size:10px;}
-.map-right-inner{display:flex;flex-direction:column;gap:3px;width:100%;}
-.map-select{width:100%;padding:7px 9px;border:1px solid #cbd5e1;border-radius:8px;font-size:12px;background:#fff;outline:none;}
-.map-select:focus{border-color:#4f46e5;}
-.map-sample{font-size:10px;color:#94a3b8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.setup-opts{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px;}
-.setup-opt label{font-size:11px;font-weight:700;color:#475569;display:block;margin-bottom:4px;text-transform:uppercase;letter-spacing:.04em;}
-.setup-opt select{width:100%;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;font-size:12px;background:#fff;outline:none;}
-.setup-opt select:focus{border-color:#4f46e5;}
-.sample-wrap{background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:10px;margin-bottom:12px;overflow-x:auto;}
-.sample-lbl{font-size:11px;font-weight:700;color:#64748b;margin-bottom:6px;}
-.sample-wrap table{width:100%;border-collapse:collapse;font-size:11px;}
-.sample-wrap th{background:#e2e8f0;padding:5px 8px;text-align:left;font-weight:700;color:#334155;}
-.sample-wrap td{padding:5px 8px;border-bottom:1px solid #f1f5f9;color:#334155;}
-/* ── Review Panel ── */
-.review-panel{display:none;background:#fff;border:1px solid #e2e8f0;border-radius:16px;margin-top:14px;box-shadow:0 10px 30px rgba(15,23,42,.07);overflow:hidden;}
-.review-header{padding:12px 14px;background:#f8fafc;border-bottom:1px solid #e2e8f0;display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap;}
-.review-title{font-weight:800;color:#1e293b;}
-.review-tools{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
-.search{padding:8px 10px;border:1px solid #cbd5e1;border-radius:10px;min-width:180px;font-size:12px;}
-.tiny{font-size:11px;color:#64748b;}
-.table-wrap{max-height:300px;overflow:auto;}
-table{width:100%;border-collapse:collapse;font-size:12px;}
-th{position:sticky;top:0;background:#f1f5f9;color:#334155;text-align:left;padding:8px;border-bottom:1px solid #cbd5e1;z-index:2;}
-td{padding:7px 8px;border-bottom:1px solid #eef2f7;vertical-align:middle;}
-tr:hover{background:#f8fafc;}
-tr.excluded{opacity:.50;background:#f8fafc;} tr.duplicate{opacity:.62;background:#f1f5f9;} tr.uncat{background:#fff7ed;}
-.amount{text-align:right;font-variant-numeric:tabular-nums;font-weight:700;}
-.desc{max-width:260px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.cat-cell{position:relative;min-width:230px;}
-.cat-input{width:215px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:10px;background:#fff;font-size:12px;outline:none;transition:box-shadow .12s,border-color .12s;}
-.cat-input:focus{border-color:#4f46e5;box-shadow:0 0 0 3px rgba(79,70,229,.12);}
-.cat-input.missing{border-color:#f97316;background:#fff7ed;}
-.autocomplete-menu{position:absolute;left:8px;top:42px;width:250px;max-height:220px;overflow:auto;background:#fff;border:1px solid #cbd5e1;border-radius:12px;box-shadow:0 18px 45px rgba(15,23,42,.18);z-index:9999;padding:6px;display:none;}
-.autocomplete-item{padding:9px 10px;border-radius:9px;cursor:pointer;font-size:12px;color:#0f172a;display:flex;justify-content:space-between;gap:8px;}
-.autocomplete-item:hover,.autocomplete-item.active{background:#eef2ff;color:#3730a3;}
-.autocomplete-empty{padding:9px 10px;color:#94a3b8;font-size:12px;}
-.check{width:18px;height:18px;accent-color:#4f46e5;} .check:disabled{accent-color:#94a3b8;cursor:not-allowed;}
-.pill{display:inline-flex;align-items:center;gap:5px;border-radius:999px;padding:4px 8px;font-size:11px;font-weight:700;white-space:nowrap;}
-.pill-ok{background:#dcfce7;color:#166534;}.pill-warn{background:#ffedd5;color:#9a3412;}.pill-skip{background:#e2e8f0;color:#475569;}.pill-dup{background:#e0e7ff;color:#3730a3;}
-.skipped-section{display:none;margin-top:14px;border:1px solid #fcd34d;border-radius:10px;overflow:hidden;background:#fff;}
-.skipped-header{background:#fffbeb;padding:9px 14px;font-size:12px;font-weight:800;color:#92400e;display:flex;align-items:center;justify-content:space-between;cursor:pointer;user-select:none;}
-.skipped-list{max-height:150px;overflow-y:auto;background:#fff;}
-.skipped-item{padding:6px 14px;font-size:10px;color:#78350f;border-bottom:1px solid #fef3c7;font-family:monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-</style></head><body>
-<h2>📂 Import Bank File — Review Mode</h2>
-<div class="subtitle">Choose your bank, or click <b>＋ New Format</b> to register a new CSV layout. Max 7 formats total (3 built-in + 4 custom).</div>
-
-<div class="banks" id="banksContainer">
-  <button type="button" class="bank-btn active" id="btn-CIBC" onclick="selectBank('CIBC')"><span class="name">🏦 CIBC</span></button>
-  <button type="button" class="bank-btn" id="btn-Amex" onclick="selectBank('Amex')"><span class="name">💳 Amex</span></button>
-  <button type="button" class="bank-btn" id="btn-Tangerine" onclick="selectBank('Tangerine')"><span class="name">🍊 Tangerine</span></button>
-  <button type="button" class="bank-btn new-fmt" id="btn-new" onclick="openNewFormatInput()"><span class="name">＋ New Format</span></button>
-</div>
-
-<!-- Inline name input for new format -->
-<div class="name-input-row" id="newFormatNameRow">
-  <label>Format name:</label>
-  <input type="text" id="newFormatNameInput" placeholder="e.g. LUCAS_AMEXFormat" maxlength="30" onkeydown="if(event.key==='Enter') confirmNewFormatName(); if(event.key==='Escape') cancelNewFormatInput();" />
-  <button type="button" class="btn btn-success" id="btnCreateFormat" style="padding:8px 14px;" onclick="confirmNewFormatName()">Create →</button>
-  <button type="button" class="btn btn-secondary" id="btnCancelFormat" style="padding:8px 12px;" onclick="cancelNewFormatInput()">Cancel</button>
-  <span id="newFormatError" style="font-size:12px;color:#ef4444;"></span>
-</div>
-
-<!-- Normal import area -->
-<div id="normalArea">
-  <div class="dropzone" id="dropzone" onclick="document.getElementById('fileInput').click()">
-    <input type="file" id="fileInput" accept=".csv,.xls,.xlsx" onchange="if(this.files[0]) handleFile(this.files[0]);" />
-    <div style="font-size:38px;margin-bottom:8px;">📄</div>
-    <div id="dz-sub"><b>Click to choose or drag &amp; drop</b><br><span style="font-size:11px;color:#94a3b8">CIBC/Tangerine: .csv · Amex: .xls, .xlsx or .csv</span></div>
-  </div>
-  <div class="file-selected" id="fileSelected">
-    <span>✅</span><span class="fs-name" id="fsName"></span>
-    <button type="button" class="fs-remove" id="btnRemoveFile" onclick="removeFile()">✕</button>
-  </div>
-  <div class="actions">
-    <button type="button" class="btn btn-primary" id="btnPreview" disabled onclick="previewImport()">Preview transactions</button>
-    <button type="button" class="btn btn-secondary" id="btnReset" onclick="removeFile()">Reset</button>
-    <span id="status"></span>
-  </div>
-</div>
-
-<!-- Setup panel: shown after name is confirmed -->
-<div id="setupPanel" class="setup-panel" style="display:none;">
-  <div class="setup-hdr">
-    <span class="setup-title" id="setupPanelTitle">⚙️ Register New CSV Format</span>
-    <button type="button" class="btn btn-secondary" id="btnCancelSetup" style="padding:6px 12px;font-size:12px;" onclick="closeSetupPanel()">✕ Cancel</button>
-  </div>
-  <div class="setup-row">
-    <label class="setup-label">Format Name</label>
-    <input type="text" id="setupName" class="setup-input" readonly style="background:#f8fafc;color:#4338ca;font-weight:700;" />
-  </div>
-  <div class="setup-dropzone" id="setupDropzone">
-    <input type="file" id="setupFileInput" accept=".csv" onchange="onSetupFileSelected(event);" />
-    <div style="font-size:28px;margin-bottom:6px;">📄</div>
-    <div><b>Upload a sample CSV</b> to detect columns</div>
-    <div style="font-size:11px;color:#6366f1;margin-top:4px;">Only .csv files supported for setup</div>
-  </div>
-  <div id="mappingPanel" style="display:none;">
-    <div style="font-size:12px;font-weight:700;color:#334155;margin-bottom:8px;">Map each required field to the matching CSV column:</div>
-    <div class="mapping-wrap">
-      <div class="map-col-left">
-        <div class="map-col-hdr">Required Fields</div>
-        <div class="map-field-row"><div class="map-field-inner"><span style="font-size:15px;">📅</span><span class="map-field-name">Date <span class="map-field-req">*</span></span></div></div>
-        <div class="map-field-row"><div class="map-field-inner"><span style="font-size:15px;">📝</span><span class="map-field-name">Description <span class="map-field-req">*</span></span></div></div>
-        <div class="map-field-row"><div class="map-field-inner"><span style="font-size:15px;">💰</span><span class="map-field-name">Amount <span class="map-field-req">*</span></span></div></div>
-      </div>
-      <div class="map-col-arrow">
-        <div class="map-col-hdr" style="justify-content:center;">←</div>
-        <div class="map-arrow-row">←</div>
-        <div class="map-arrow-row">←</div>
-        <div class="map-arrow-row">←</div>
-      </div>
-      <div class="map-col-right">
-        <div class="map-col-hdr">CSV Columns (from your file)</div>
-        <div class="map-field-row"><div class="map-right-inner"><select id="mapDate" class="map-select" onchange="renderSamplePreview()"></select><div class="map-sample" id="sampleDate"></div></div></div>
-        <div class="map-field-row"><div class="map-right-inner"><select id="mapDesc" class="map-select" onchange="renderSamplePreview()"></select><div class="map-sample" id="sampleDesc"></div></div></div>
-        <div class="map-field-row"><div class="map-right-inner"><select id="mapAmount" class="map-select" onchange="renderSamplePreview()"></select><div class="map-sample" id="sampleAmount"></div></div></div>
-      </div>
-    </div>
-    <div class="setup-opts">
-      <div class="setup-opt">
-        <label>Date Format</label>
-        <select id="setupDateFormat">
-          <option value="auto">Auto-detect</option>
-          <option value="dd MMM yyyy">dd MMM yyyy &nbsp;(09 Jun 2026)</option>
-          <option value="yyyy-MM-dd">yyyy-MM-dd &nbsp;(2026-06-09)</option>
-          <option value="MM/dd/yyyy">MM/dd/yyyy &nbsp;(06/09/2026)</option>
-          <option value="dd/MM/yyyy">dd/MM/yyyy &nbsp;(09/06/2026)</option>
-        </select>
-      </div>
-      <div class="setup-opt">
-        <label>Expense Amount Sign</label>
-        <select id="setupAmountSign">
-          <option value="positive">Positive = Expense &nbsp;(25.00)</option>
-          <option value="negative">Negative = Expense &nbsp;(-25.00)</option>
-        </select>
-      </div>
-    </div>
-    <div class="sample-wrap">
-      <div class="sample-lbl">📋 Preview — first rows with your mapping:</div>
-      <div id="samplePreview"></div>
-    </div>
-    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
-      <button type="button" class="btn btn-success" id="btnSaveFormat" onclick="saveFormatAndPreview()">💾 Save &amp; Preview Transactions</button>
-      <button type="button" class="btn btn-secondary" id="btnCancelSetup2" onclick="closeSetupPanel()">Cancel</button>
-      <span id="setupStatus" style="font-size:12px;flex:1;"></span>
-    </div>
-  </div>
-</div>
-
-<!-- Review panel -->
-<div class="review-panel" id="reviewPanel">
-  <div class="review-header">
-    <div>
-      <div class="review-title" id="reviewTitle">Review transactions</div>
-      <div class="tiny" id="reviewSummary"></div>
-    </div>
-    <div class="review-tools">
-      <input class="search" id="filterBox" placeholder="Search description/category..." oninput="renderReviewTable()" />
-      <button type="button" class="btn btn-secondary" id="btnCheckAll" onclick="setAllInclude(true)">Check all</button>
-      <button type="button" class="btn btn-secondary" id="btnUncheckAll" onclick="setAllInclude(false)">Uncheck all</button>
-    </div>
-  </div>
-  <div class="table-wrap">
-    <table>
-      <thead><tr><th>Import</th><th>Date</th><th>Description</th><th>Amount</th><th>Bank</th><th>Category</th><th>Status</th></tr></thead>
-      <tbody id="reviewBody"></tbody>
-    </table>
-  </div>
-  <div class="actions" style="padding:12px 14px;border-top:1px solid #e2e8f0;margin-top:0;">
-    <button type="button" class="btn btn-primary" id="btnCommit" onclick="commitImport()">Confirm import selected</button>
-    <button type="button" class="btn btn-danger" id="btnCancelImport" onclick="removeFile()">Cancel</button>
-    <span class="tiny" id="commitHint"></span>
-  </div>
-</div>
-<div class="skipped-section" id="skipped-section">
-  <div class="skipped-header" id="skippedHeader" onclick="toggleSkipped()">
-    <span id="skipped-title">⏭ Skipped duplicates</span>
-    <span id="skipped-toggle">▼ Show</span>
-  </div>
-  <div id="skipped-list" class="skipped-list" style="display:none"></div>
-</div>
-
-<script>
-  // ── State ──
-  var selectedBank = 'CIBC';
-  var selectedFile = null;
-  var selectedCustomFormat = null;
-  var amexParsedRows = null;
-  var reviewRows = [];
-  var categoryOptions = [];
-  var customFormats = [];
-  var setupCsvHeaders = [];
-  var setupCsvSampleRows = [];
-  var setupFile = null;
-  var MAX_CUSTOM = 4;
-
-  // ── Init: load saved formats + drag-drop ──
-  google.script.run
-    .withSuccessHandler(function(res) {
-      if (res && res.ok && res.formats && res.formats.length > 0) {
-        customFormats = res.formats;
-        renderBankButtons();
-      }
-    })
-    .withFailureHandler(function(){})
-    .getCsvFormats();
-
-  // Drag & Drop (cannot be inline)
-  (function() {
-    var dz = document.getElementById('dropzone');
-    if (!dz) return;
-    ['dragenter','dragover'].forEach(function(ev){ dz.addEventListener(ev, function(e){ e.preventDefault(); dz.classList.add('drag'); }); });
-    ['dragleave','drop'].forEach(function(ev){ dz.addEventListener(ev, function(e){ e.preventDefault(); dz.classList.remove('drag'); }); });
-    dz.addEventListener('drop', function(e){ var f = e.dataTransfer.files && e.dataTransfer.files[0]; if(f) handleFile(f); });
-  })();
-
-  // ── Helpers ──
-  function esc(v){ return String(v==null?'':v).replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
-  function money(n){ return '$'+Number(n||0).toLocaleString('en-CA',{minimumFractionDigits:2,maximumFractionDigits:2}); }
-
-  // ── Bank buttons ──
-  function renderBankButtons() {
-    document.querySelectorAll('.bank-btn-custom').forEach(function(b){ b.remove(); });
-    var container = document.getElementById('banksContainer');
-    var newBtn = document.getElementById('btn-new');
-    customFormats.forEach(function(fmt) {
-      var btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'bank-btn custom-fmt bank-btn-custom';
-      btn.id = 'btn-cf-' + fmt.name;
-      var nameSpan = document.createElement('span');
-      nameSpan.className = 'name';
-      nameSpan.textContent = '📋 ' + fmt.name;
-      btn.appendChild(nameSpan);
-      var delSpan = document.createElement('span');
-      delSpan.className = 'del-fmt';
-      delSpan.title = 'Delete this format';
-      delSpan.textContent = '×';
-      delSpan.addEventListener('click', (function(n){ return function(e){ e.stopPropagation(); deleteFormat(n); }; })(fmt.name));
-      btn.appendChild(delSpan);
-      btn.addEventListener('click', (function(f){ return function(){ selectCustomFormat(f); }; })(fmt));
-      container.insertBefore(btn, newBtn);
-    });
-    newBtn.style.display = customFormats.length >= MAX_CUSTOM ? 'none' : '';
-  }
-
-  function selectBank(b) {
-    selectedBank = b; selectedCustomFormat = null;
-    document.querySelectorAll('.bank-btn').forEach(function(x){ x.classList.remove('active'); });
-    var btn = document.getElementById('btn-' + b); if (btn) btn.classList.add('active');
-    closeSetupPanel(); cancelNewFormatInput(); removeFile(false);
-    document.getElementById('dz-sub').innerHTML = '<b>Click to choose or drag &amp; drop</b><br><span style="font-size:11px;color:#94a3b8">CIBC/Tangerine: .csv · Amex: .xls, .xlsx or .csv</span>';
-  }
-
-  function selectCustomFormat(fmt) {
-    selectedBank = fmt.name; selectedCustomFormat = fmt;
-    document.querySelectorAll('.bank-btn').forEach(function(x){ x.classList.remove('active'); });
-    var btn = document.getElementById('btn-cf-' + fmt.name); if (btn) btn.classList.add('active');
-    closeSetupPanel(); cancelNewFormatInput(); removeFile(false);
-    document.getElementById('dz-sub').innerHTML = '<b>Click to choose or drag &amp; drop</b><br><span style="font-size:11px;color:#6366f1">Format: <b>' + esc(fmt.name) + '</b> · .csv only</span>';
-  }
-
-  // ── New Format name-first flow ──
-  function openNewFormatInput() {
-    document.getElementById('newFormatError').textContent = '';
-    document.getElementById('newFormatNameInput').value = '';
-    document.getElementById('newFormatNameRow').style.display = 'flex';
-    document.getElementById('btn-new').style.display = 'none';
-    document.getElementById('newFormatNameInput').focus();
-  }
-
-  function cancelNewFormatInput() {
-    document.getElementById('newFormatNameRow').style.display = 'none';
-    if (customFormats.length < MAX_CUSTOM) document.getElementById('btn-new').style.display = '';
-  }
-
-  function confirmNewFormatName() {
-    var name = document.getElementById('newFormatNameInput').value.trim();
-    var errEl = document.getElementById('newFormatError');
-    if (!name) { errEl.textContent = 'Please enter a name.'; return; }
-    if (['CIBC','Amex','Tangerine'].indexOf(name) >= 0) { errEl.textContent = '"' + name + '" is reserved.'; return; }
-    if (customFormats.some(function(f){ return f.name === name; })) { errEl.textContent = '"' + name + '" already exists.'; return; }
-    cancelNewFormatInput();
-    openSetupPanel(name);
-  }
-
-  // ── Delete format ──
-  function deleteFormat(name) {
-    if (!confirm('Delete format "' + name + '"?\nThis cannot be undone.')) return;
-    google.script.run
-      .withSuccessHandler(function(res) {
-        if (!res || !res.ok) { alert('Error: ' + (res ? res.error : 'unknown')); return; }
-        customFormats = customFormats.filter(function(f){ return f.name !== name; });
-        if (selectedCustomFormat && selectedCustomFormat.name === name) {
-          selectedCustomFormat = null; selectedBank = 'CIBC'; removeFile(false);
-        }
-        renderBankButtons();
-        document.querySelectorAll('.bank-btn').forEach(function(x){ x.classList.remove('active'); });
-        var active = document.getElementById('btn-' + selectedBank) || document.getElementById('btn-cf-' + selectedBank);
-        if (active) active.classList.add('active');
-      })
-      .withFailureHandler(function(e){ alert('Error: ' + (e.message||e)); })
-      .deleteCsvFormat(name);
-  }
-
-  // ── Normal file handling ──
-  function handleFile(file) {
-    selectedFile = file; amexParsedRows = null; reviewRows = [];
-    document.getElementById('fsName').textContent = file.name;
-    document.getElementById('fileSelected').style.display = 'flex';
-    document.getElementById('dropzone').style.display = 'none';
-    document.getElementById('btnPreview').disabled = false;
-    document.getElementById('reviewPanel').style.display = 'none';
-    document.getElementById('skipped-section').style.display = 'none';
-    document.getElementById('status').className = 'inf';
-    document.getElementById('status').textContent = 'Ready to preview.';
-    if (selectedBank === 'Amex' && (file.name.toLowerCase().endsWith('.xls') || file.name.toLowerCase().endsWith('.xlsx'))) {
-      parseAmexXlsInBrowser(file);
-    }
-  }
-
-  function removeFile(clearInput) {
-    if (clearInput !== false) { var fi = document.getElementById('fileInput'); if(fi) fi.value = ''; }
-    selectedFile = null; amexParsedRows = null; reviewRows = []; categoryOptions = [];
-    document.getElementById('fileSelected').style.display = 'none';
-    document.getElementById('dropzone').style.display = 'block';
-    document.getElementById('btnPreview').disabled = true;
-    document.getElementById('status').textContent = '';
-    document.getElementById('reviewPanel').style.display = 'none';
-    document.getElementById('skipped-section').style.display = 'none';
-  }
-
-  // ── Setup Panel ──
-  function openSetupPanel(name) {
-    document.querySelectorAll('.bank-btn').forEach(function(x){ x.classList.remove('active'); });
-    document.getElementById('normalArea').style.display = 'none';
-    document.getElementById('setupPanel').style.display = 'block';
-    document.getElementById('reviewPanel').style.display = 'none';
-    document.getElementById('mappingPanel').style.display = 'none';
-    document.getElementById('setupName').value = name || '';
-    document.getElementById('setupPanelTitle').textContent = '⚙️ Register: ' + (name || 'New Format');
-    document.getElementById('setupFileInput').value = '';
-    document.getElementById('setupStatus').textContent = '';
-    setupFile = null; setupCsvHeaders = []; setupCsvSampleRows = [];
-  }
-
-  function closeSetupPanel() {
-    document.getElementById('setupPanel').style.display = 'none';
-    document.getElementById('normalArea').style.display = 'block';
-    document.querySelectorAll('.bank-btn').forEach(function(x){ x.classList.remove('active'); });
-    var btn = document.getElementById('btn-' + selectedBank) || document.getElementById('btn-cf-' + selectedBank);
-    if (btn) btn.classList.add('active');
-  }
-
-  function onSetupFileSelected(event) {
-    var file = event.target.files[0]; if (!file) return;
-    setupFile = file;
-    var reader = new FileReader();
-    reader.onload = function(e){ parseSetupCsvBrowser(e.target.result); };
-    reader.readAsText(file);
-  }
-
-  function parseCsvLineBrowser(line) {
-    var result = [], cur = '', inQ = false;
-    for (var i = 0; i < line.length; i++) {
-      var ch = line[i], nx = line[i+1];
-      if (ch === '"') { if (inQ && nx === '"') { cur += '"'; i++; } else inQ = !inQ; }
-      else if (ch === ',' && !inQ) { result.push(cur.trim()); cur = ''; }
-      else cur += ch;
-    }
-    result.push(cur.trim()); return result;
-  }
-
-  function parseSetupCsvBrowser(text) {
-    var lines = text.replace(/\r\n/g,'\n').replace(/\r/g,'\n').split('\n').filter(function(l){ return l.trim(); });
-    if (lines.length < 2) { document.getElementById('setupStatus').className='err'; document.getElementById('setupStatus').textContent='❌ CSV must have header + at least one data row.'; return; }
-    setupCsvHeaders = parseCsvLineBrowser(lines[0]);
-    setupCsvSampleRows = [];
-    for (var i = 1; i < Math.min(4, lines.length); i++) setupCsvSampleRows.push(parseCsvLineBrowser(lines[i]));
-    renderMappingPanel();
-  }
-
-  function renderMappingPanel() {
-    ['mapDate','mapDesc','mapAmount'].forEach(function(id) {
-      var sel = document.getElementById(id); sel.innerHTML = '';
-      setupCsvHeaders.forEach(function(h, idx) { var o = document.createElement('option'); o.value=idx; o.textContent=h; sel.appendChild(o); });
-    });
-    setupCsvHeaders.forEach(function(h, idx) {
-      var l = h.toLowerCase().replace(/[^a-z]/g,'');
-      if (l==='date'||(l.includes('date')&&!l.includes('process')&&!l.includes('post'))) document.getElementById('mapDate').value=idx;
-      if (['description','desc','narrative','memo','name','details','merchant'].some(function(k){ return l.includes(k); })) document.getElementById('mapDesc').value=idx;
-      if (['amount','amt','debit','value','total'].some(function(k){ return l.includes(k); })) document.getElementById('mapAmount').value=idx;
-    });
-    renderSamplePreview();
-    document.getElementById('mappingPanel').style.display = 'block';
-  }
-
-  function renderSamplePreview() {
-    var di=parseInt(document.getElementById('mapDate').value), ni=parseInt(document.getElementById('mapDesc').value), ai=parseInt(document.getElementById('mapAmount').value);
-    var s = setupCsvSampleRows[0]||[];
-    document.getElementById('sampleDate').textContent   = s[di] ? 'e.g. '+s[di]  : '';
-    document.getElementById('sampleDesc').textContent   = s[ni] ? 'e.g. '+s[ni]  : '';
-    document.getElementById('sampleAmount').textContent = s[ai] ? 'e.g. '+s[ai]  : '';
-    var dh=esc(setupCsvHeaders[di]||'?'), nh=esc(setupCsvHeaders[ni]||'?'), ah=esc(setupCsvHeaders[ai]||'?');
-    var html='<table><thead><tr><th>Date ('+dh+')</th><th>Description ('+nh+')</th><th>Amount ('+ah+')</th></tr></thead><tbody>';
-    setupCsvSampleRows.forEach(function(row){ html+='<tr><td>'+esc(row[di]||'')+'</td><td>'+esc(row[ni]||'')+'</td><td>'+esc(row[ai]||'')+'</td></tr>'; });
-    html+='</tbody></table>';
-    document.getElementById('samplePreview').innerHTML = html;
-  }
-
-  function saveFormatAndPreview() {
-    var name=document.getElementById('setupName').value.trim(), statusEl=document.getElementById('setupStatus');
-    if (!name) { statusEl.className='err'; statusEl.textContent='❌ Format name is required.'; return; }
-    if (!setupFile) { statusEl.className='err'; statusEl.textContent='❌ Please upload a CSV file.'; return; }
-    var config = { name:name, dateCol:parseInt(document.getElementById('mapDate').value), descCol:parseInt(document.getElementById('mapDesc').value),
-      amountCol:parseInt(document.getElementById('mapAmount').value), dateFormat:document.getElementById('setupDateFormat').value,
-      amountSign:document.getElementById('setupAmountSign').value, skipRows:1 };
-    statusEl.className='inf'; statusEl.textContent='⏳ Saving format...';
-    google.script.run
-      .withSuccessHandler(function(res) {
-        if (!res.ok) { statusEl.className='err'; statusEl.textContent='❌ '+res.error; return; }
-        var existing=customFormats.findIndex(function(f){ return f.name===config.name; });
-        if (existing>=0) customFormats[existing]=config; else customFormats.push(config);
-        renderBankButtons();
-        selectedCustomFormat=config; selectedBank=config.name; selectedFile=setupFile;
-        closeSetupPanel();
-        document.getElementById('fsName').textContent=setupFile.name;
-        document.getElementById('fileSelected').style.display='flex';
-        document.getElementById('dropzone').style.display='none';
-        document.getElementById('btnPreview').disabled=false;
-        document.querySelectorAll('.bank-btn').forEach(function(x){ x.classList.remove('active'); });
-        var cfBtn=document.getElementById('btn-cf-'+config.name); if(cfBtn) cfBtn.classList.add('active');
-        document.getElementById('status').className='ok'; document.getElementById('status').textContent='✅ Format "'+esc(name)+'" saved!';
-        previewImport();
-      })
-      .withFailureHandler(function(e){ statusEl.className='err'; statusEl.textContent='❌ '+(e.message||e); })
-      .saveCsvFormat(config);
-  }
-
-  // ── Amex XLS ──
-  function parseAmexXlsInBrowser(file) {
-    document.getElementById('status').className='inf'; document.getElementById('status').textContent='⏳ Reading Amex file...';
-    var reader = new FileReader();
-    reader.onload = function(e) {
-      try {
-        var wb=XLSX.read(new Uint8Array(e.target.result),{type:'array',cellDates:true}), ws=wb.Sheets[wb.SheetNames[0]];
-        var rows=XLSX.utils.sheet_to_json(ws,{header:1,defval:''}), headerIdx=-1;
-        for (var i=0;i<rows.length;i++){ if(String(rows[i][0]||'').trim()==='Date'){headerIdx=i;break;} }
-        if (headerIdx===-1) throw new Error('Could not find Amex transaction table.');
-        var parsed=[];
-        for (var i=headerIdx+1;i<rows.length;i++) {
-          var row=rows[i],rawDate=row[0],desc=String(row[2]||'').trim(),rawAmt=row[3];
-          if (!rawDate||!desc) continue;
-          var dateStr;
-          if (rawDate instanceof Date){var M=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];dateStr=rawDate.getDate()+' '+M[rawDate.getMonth()]+'. '+rawDate.getFullYear();}
-          else dateStr=String(rawDate).trim();
-          var amtStr=String(rawAmt||'').replace(/[$,]/g,'').trim();
-          if (!dateStr||isNaN(parseFloat(amtStr))) continue;
-          parsed.push({date:dateStr,desc:desc,amount:amtStr});
-        }
-        if (parsed.length===0) throw new Error('No Amex transactions found.');
-        amexParsedRows=parsed;
-        document.getElementById('status').className='ok'; document.getElementById('status').textContent='✅ Amex file read. Click Preview transactions.';
-      } catch(err){ document.getElementById('status').className='err'; document.getElementById('status').textContent='❌ '+err.message; document.getElementById('btnPreview').disabled=true; }
-    };
-    reader.readAsArrayBuffer(file);
-  }
-
-  // ── Preview ──
-  function previewImport() {
-    if (!selectedFile) return;
-    var status=document.getElementById('status');
-    status.className='inf'; status.textContent='⏳ Building preview...'; document.getElementById('btnPreview').disabled=true;
-    function onPreview(res) {
-      document.getElementById('btnPreview').disabled=false;
-      if (!res.ok){status.className='err';status.textContent='❌ '+res.error;return;}
-      reviewRows=res.transactions||[]; categoryOptions=res.categories||[];
-      status.className='ok'; status.textContent='✅ Preview ready. Duplicates are unchecked automatically.';
-      document.getElementById('reviewPanel').style.display='block'; renderReviewTable();
-    }
-    function fail(e){status.className='err';status.textContent='❌ '+(e.message||e);document.getElementById('btnPreview').disabled=false;}
-    var reader=new FileReader();
-    if (selectedCustomFormat) {
-      reader.onload=function(e){ google.script.run.withSuccessHandler(onPreview).withFailureHandler(fail).previewFileImport(selectedBank,e.target.result.split(',')[1],selectedFile.name,selectedCustomFormat); };
-      reader.readAsDataURL(selectedFile); return;
-    }
-    if (selectedBank==='Amex'&&amexParsedRows) {
-      google.script.run.withSuccessHandler(onPreview).withFailureHandler(fail).previewFileImport('Amex',JSON.stringify({rows:amexParsedRows}),selectedFile.name); return;
-    }
-    reader.onload=function(e){ google.script.run.withSuccessHandler(onPreview).withFailureHandler(fail).previewFileImport(selectedBank,e.target.result.split(',')[1],selectedFile.name); };
-    reader.readAsDataURL(selectedFile);
-  }
-
-  // ── Review Table ──
-  function getReviewSortRank(row){ if(row&&row.include&&!row.isDuplicate)return 0; if(row&&!row.include&&!row.isDuplicate)return 1; return 2; }
-  function getSortedReviewEntries(){
-    return reviewRows.map(function(row,index){ return {row:row,index:index}; }).sort(function(a,b){
-      var ra=getReviewSortRank(a.row),rb=getReviewSortRank(b.row); if(ra!==rb)return ra-rb;
-      var da=String(a.row.dateISO||''),db=String(b.row.dateISO||''); if(da!==db)return db.localeCompare(da);
-      return Number(b.row.amount||0)-Number(a.row.amount||0);
-    });
-  }
-
-  function renderReviewTable() {
-    var q=String(document.getElementById('filterBox').value||'').toLowerCase(), body=document.getElementById('reviewBody');
-    var selected=0,total=0,uncat=0,dups=0,sum=0, html=[];
-    getSortedReviewEntries().forEach(function(entry) {
-      var r=entry.row,i=entry.index;
-      var hay=(r.desc+' '+r.category+' '+r.bank+' '+r.dateLabel+' '+(r.isDuplicate?'duplicate':'')).toLowerCase();
-      if(q&&hay.indexOf(q)<0)return; total++;
-      if(r.isDuplicate)dups++; if(r.include){selected++;sum+=Number(r.amount||0);} if(r.include&&!r.category&&!r.isDuplicate)uncat++;
-      var cls=(r.include?'':'excluded ')+(r.isDuplicate?'duplicate ':'')+((!r.category&&!r.isDuplicate)?'uncat':'');
-      var st=r.isDuplicate?'<span class="pill pill-dup">🔁 Duplicate</span>':(!r.include?'<span class="pill pill-skip">Skipped</span>':(!r.category?'<span class="pill pill-warn">Needs category</span>':'<span class="pill pill-ok">Ready</span>'));
-      html.push('<tr class="'+cls+'"><td><input class="check" type="checkbox" '+(r.include?'checked':'')+' '+(r.isDuplicate?'disabled title="Already imported"':'')+' onchange="updateInclude('+i+',this.checked)"></td><td>'+esc(r.dateLabel)+'</td><td class="desc" title="'+esc(r.desc)+'">'+esc(r.desc)+'</td><td class="amount">'+money(r.amount)+'</td><td>'+esc(r.bank)+'</td><td class="cat-cell"><input autocomplete="off" class="cat-input '+(!r.category&&!r.isDuplicate?'missing':'')+'" id="cat-'+i+'" value="'+esc(r.category)+'" placeholder="Type category..." oninput="updateCategorySoft('+i+',this.value)" onfocus="openCategoryAutocomplete('+i+')" onkeydown="categoryKeydown(event,'+i+')"><div class="autocomplete-menu" id="cat-menu-'+i+'"></div></td><td>'+st+'</td></tr>');
-    });
-    body.innerHTML=html.join('')||'<tr><td colspan="7" class="tiny">No matching rows.</td></tr>';
-    document.getElementById('reviewTitle').textContent='Review '+reviewRows.length+' parsed transactions';
-    document.getElementById('reviewSummary').textContent=selected+' selected · '+dups+' duplicate unchecked · '+uncat+' selected without category · '+money(sum)+' selected total';
-    document.getElementById('commitHint').textContent='Duplicates are unchecked by default. Only checked non-duplicate rows will be imported.';
-    document.getElementById('btnCommit').disabled=selected===0;
-  }
-
-  function updateInclude(i,v){ if(!reviewRows[i])return; if(reviewRows[i].isDuplicate){reviewRows[i].include=false;renderReviewTable();return;} reviewRows[i].include=v; renderReviewTable(); }
-  function updateCategorySoft(i,v){ if(!reviewRows[i])return; reviewRows[i].category=String(v||'').trim(); renderCategorySuggestions(i); updateReviewSummaryOnly(); }
-  function updateReviewSummaryOnly(){
-    var selected=0,uncat=0,dups=0,sum=0;
-    reviewRows.forEach(function(r){ if(r.isDuplicate)dups++; if(r.include){selected++;sum+=Number(r.amount||0);} if(r.include&&!r.category&&!r.isDuplicate)uncat++; });
-    document.getElementById('reviewSummary').textContent=selected+' selected · '+dups+' duplicate unchecked · '+uncat+' selected without category · '+money(sum)+' selected total';
-    document.getElementById('btnCommit').disabled=selected===0;
-  }
-  function setAllInclude(v){ reviewRows.forEach(function(r){ r.include=v?!r.isDuplicate:false; }); renderReviewTable(); }
-  function openCategoryAutocomplete(i){ renderCategorySuggestions(i); }
-  function closeAllAutocomplete(exceptId){ document.querySelectorAll('.autocomplete-menu').forEach(function(m){ if(!exceptId||m.id!==exceptId)m.style.display='none'; }); }
-  function renderCategorySuggestions(i){
-    var input=document.getElementById('cat-'+i),menu=document.getElementById('cat-menu-'+i);
-    if(!input||!menu)return; closeAllAutocomplete(menu.id);
-    var val=String(input.value||'').trim().toLowerCase(), list=categoryOptions.slice();
-    if(val){ list=list.filter(function(c){return c.toLowerCase().indexOf(val)!==-1;}).sort(function(a,b){ var av=a.toLowerCase(),bv=b.toLowerCase(); var ap=av.startsWith(val)?0:1,bp=bv.startsWith(val)?0:1; if(ap!==bp)return ap-bp; return av.localeCompare(bv); }); }
-    list=list.slice(0,10);
-    if(list.length===0){menu.innerHTML='<div class="autocomplete-empty">No category found. You can type a new one.</div>';menu.style.display='block';return;}
-    menu.innerHTML='';
-    list.forEach(function(c,idx){
-      var item=document.createElement('div'); item.className='autocomplete-item'+(idx===0?' active':''); item.setAttribute('data-value',c);
-      var label=document.createElement('span'); label.textContent=c; item.appendChild(label);
-      item.addEventListener('mousedown',function(ev){ev.preventDefault();selectCategorySuggestion(i,c);});
-      menu.appendChild(item);
-    }); menu.style.display='block';
-  }
-  function selectCategorySuggestion(i,value){
-    if(!reviewRows[i])return; var v=String(value||'').trim(); reviewRows[i].category=v;
-    var input=document.getElementById('cat-'+i); if(input)input.value=v;
-    closeAllAutocomplete(); renderReviewTable();
-  }
-  function categoryKeydown(e,i){
-    var menu=document.getElementById('cat-menu-'+i); if(!menu||menu.style.display==='none')return;
-    var items=Array.prototype.slice.call(menu.querySelectorAll('.autocomplete-item')); if(!items.length)return;
-    var idx=items.findIndex(function(x){ return x.classList.contains('active'); }); if(idx<0)idx=0;
-    if(e.key==='ArrowDown'){e.preventDefault();if(items[idx])items[idx].classList.remove('active');idx=(idx+1)%items.length;items[idx].classList.add('active');items[idx].scrollIntoView({block:'nearest'});}
-    else if(e.key==='ArrowUp'){e.preventDefault();if(items[idx])items[idx].classList.remove('active');idx=(idx-1+items.length)%items.length;items[idx].classList.add('active');items[idx].scrollIntoView({block:'nearest'});}
-    else if(e.key==='Enter'){e.preventDefault();selectCategorySuggestion(i,items[Math.max(0,idx)].getAttribute('data-value'));}
-    else if(e.key==='Escape'){closeAllAutocomplete();}
-  }
-  document.addEventListener('click',function(e){ if(!e.target.classList||!e.target.classList.contains('cat-input'))closeAllAutocomplete(); });
-
-  // ── Commit ──
-  function commitImport(){
-    var status=document.getElementById('status');
-    status.className='inf'; status.textContent='⏳ Importing selected transactions...'; document.getElementById('btnCommit').disabled=true;
-    google.script.run.withSuccessHandler(function(res){
-      document.getElementById('btnCommit').disabled=false;
-      if(res.ok){
-        var addedTxt=res.added>0?'✅ Added: '+res.added:'⚠️ Nothing new';
-        var skipTxt=res.skipped>0?'  ·  ⏭ Skipped: '+res.skipped+' duplicates':'';
-        status.className=res.added>0?'ok':'warn'; status.textContent=addedTxt+skipTxt;
-        if(res.skipped>0&&res.skippedList&&res.skippedList.length>0){
-          document.getElementById('skipped-title').textContent='⏭ Skipped '+res.skipped+' duplicates';
-          document.getElementById('skipped-list').innerHTML=res.skippedList.map(function(s){return '<div class="skipped-item">'+esc(s)+'</div>';}).join('');
-          document.getElementById('skipped-section').style.display='block';
-        }
-        if(res.added>0)document.getElementById('reviewPanel').style.display='none';
-      } else {status.className='err';status.textContent='❌ '+res.error;}
-    }).withFailureHandler(function(e){status.className='err';status.textContent='❌ '+(e.message||e);document.getElementById('btnCommit').disabled=false;})
-    .commitReviewedImport(selectedBank, reviewRows);
-  }
-
-  var skippedOpen=false;
-  function toggleSkipped(){ skippedOpen=!skippedOpen; document.getElementById('skipped-list').style.display=skippedOpen?'block':'none'; document.getElementById('skipped-toggle').textContent=skippedOpen?'▲ Hide':'▼ Show'; }
-<\/script></body></html>`;
+  return HtmlService.createHtmlOutputFromFile('Modal').getContent();
 }
 
 // Compatibility wrapper.
-// The menu uses buildReviewImportModalHTML_(), but this prevents old calls from breaking.
 function buildModalHTML() {
   return buildReviewImportModalHTML_();
 }
