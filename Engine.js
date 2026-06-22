@@ -46,6 +46,7 @@ function getDashboardData(leakWindow, forceRefresh) {
     const cached = _loadFromCache();
     if (cached) {
       const budgetData = calcBudgetData(cached.currentMonthCats);
+      const layerData  = calcLayerData(cached.currentMonthCats);
       let leaks = cached.leaks;
       // Only re-read the sheet when the requested leak window differs from what is cached.
       // This prevents a full sheet read on every cache hit.
@@ -62,7 +63,7 @@ function getDashboardData(leakWindow, forceRefresh) {
       }
       return {
         ok: true,
-        data: Object.assign({}, cached, { budgetData, leaks }),
+        data: Object.assign({}, cached, { budgetData, layerData, leaks }),
         fromCache: true
       };
     }
@@ -80,6 +81,7 @@ function getDashboardData(leakWindow, forceRefresh) {
     const leaks      = _calcLeaks(parsed, reqWindow);
     const txByCat    = _buildTxByCat(parsed);
     const budgetData = calcBudgetData(analytics.currentMonthCats);
+    const layerData  = calcLayerData(analytics.currentMonthCats);
     const budgets    = getBudgets();
 
     const payload = {
@@ -91,7 +93,7 @@ function getDashboardData(leakWindow, forceRefresh) {
       months:           analytics.months,
       currentMonthKey:  analytics.currentMonthKey,
       currentMonthCats: analytics.currentMonthCats,
-      budgetData, leaks, budgets, txByCat,
+      budgetData, layerData, leaks, budgets, txByCat,
       leakWindow: reqWindow
     };
 
@@ -314,6 +316,58 @@ function calcBudgetData(currentMonthCats) {
   });
 
   return items;
+}
+
+// Groups current-month spending into the 3 layers (Fixed / Variable / Lifestyle).
+// Reuses getBudgets() + getBudgetTypes() (WebApp.js). Returns null if no Budgets sheet data.
+function calcLayerData(currentMonthCats) {
+  const budgets = getBudgets();
+  const types   = getBudgetTypes();
+  if (Object.keys(types).length === 0) return null;
+
+  const cmCats = currentMonthCats || {};
+  const catSet = {};
+  Object.keys(cmCats).forEach(function(c){ catSet[c] = true; });
+  Object.keys(budgets).forEach(function(c){ catSet[c] = true; });
+  Object.keys(types).forEach(function(c){ catSet[c] = true; });
+
+  const layers = {
+    Fixed:     { budget: 0, spent: 0, cats: [] },
+    Variable:  { budget: 0, spent: 0, cats: [] },
+    Lifestyle: { budget: 0, spent: 0, cats: [] }
+  };
+
+  Object.keys(catSet).forEach(function(cat) {
+    if (!cat || cat.startsWith("ℹ")) return;
+    if (CONFIG.INCOME_CATEGORIES.indexOf(cat) >= 0) return;
+
+    const type   = layers[types[cat]] ? types[cat] : "Variable";
+    const spent  = Math.round((cmCats[cat] || 0) * 100) / 100;
+    const budget = budgets[cat] || 0;
+    if (spent === 0 && budget === 0) return; // skip empty noise
+
+    const pct    = budget > 0 ? Math.floor((spent / budget) * 100) : 0;
+    const status = pct >= 100 ? "over" : pct >= 80 ? "warning" : "ok";
+
+    const L = layers[type];
+    L.budget += budget;
+    L.spent  += spent;
+    L.cats.push({ cat: cat, budget: budget, spent: spent, pct: pct, status: status });
+  });
+
+  ["Fixed", "Variable", "Lifestyle"].forEach(function(k) {
+    layers[k].budget = Math.round(layers[k].budget * 100) / 100;
+    layers[k].spent  = Math.round(layers[k].spent  * 100) / 100;
+    layers[k].cats.sort(function(a, b){ return b.spent - a.spent; });
+  });
+
+  const totalSpent   = layers.Fixed.spent + layers.Variable.spent + layers.Lifestyle.spent;
+  const controllable = Math.round((layers.Variable.spent + layers.Lifestyle.spent) * 100) / 100;
+
+  return Object.assign(layers, {
+    controllable: controllable,
+    totalSpent:   Math.round(totalSpent * 100) / 100
+  });
 }
 
 // ── Compat: setupAnalysisSheet ────────────────────────────────

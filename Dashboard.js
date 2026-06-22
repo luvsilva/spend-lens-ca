@@ -168,6 +168,29 @@ canvas{width:100%!important;height:100%!important;}
 .rem-bar-fill{height:100%;border-radius:5px;transition:width .5s ease;}
 .rem-labels{display:flex;justify-content:space-between;font-size:10px;color:var(--muted);margin-top:4px;}
 .rem-projection{font-size:11px;color:var(--text2);margin-top:6px;}
+/* ── Spending Layers ── */
+.layers-wrap{margin:0 16px 10px;}
+.layers-hero{background:linear-gradient(135deg,rgba(129,140,248,.16),rgba(192,132,252,.12));border:1px solid rgba(129,140,248,.3);border-radius:var(--radius);padding:14px 18px;margin-bottom:10px;}
+.lh-label{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--text2);}
+.lh-amount{font-size:30px;font-weight:800;font-family:'JetBrains Mono',monospace;color:var(--text);line-height:1.1;margin:2px 0;}
+.lh-sub{font-size:11px;color:var(--text2);}
+.layers-cards{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;}
+.layer-card{background:var(--surf);border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px;cursor:pointer;transition:border-color .15s,transform .1s,opacity .15s;}
+.layer-card:hover{transform:translateY(-1px);}
+.layer-card.active{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent);}
+.layer-card.locked{opacity:.62;background:var(--surf2);}
+.layer-card.locked:hover{opacity:.78;}
+.lc-top{display:flex;align-items:center;gap:7px;margin-bottom:7px;}
+.lc-icon{font-size:14px;}
+.lc-name{font-size:12px;font-weight:700;flex:1;}
+.lc-tag{font-size:8px;font-weight:800;letter-spacing:.4px;padding:2px 7px;border-radius:20px;background:var(--surf2);color:var(--muted);}
+.layer-variable .lc-tag{background:rgba(251,146,60,.16);color:var(--orange);}
+.layer-lifestyle .lc-tag{background:rgba(192,132,252,.16);color:var(--purple);}
+.lc-amount{font-size:20px;font-weight:800;font-family:'JetBrains Mono',monospace;color:var(--text);}
+.lc-bar-bg{height:6px;background:var(--surf2);border-radius:3px;overflow:hidden;margin:7px 0 5px;}
+.lc-bar-fill{height:100%;border-radius:3px;transition:width .4s ease;}
+.lc-sub{display:flex;justify-content:space-between;font-size:9px;color:var(--muted);}
+body.is-mobile .layers-cards{grid-template-columns:1fr;}
 .leaks-section{padding:0 16px 12px;flex:1;overflow-y:auto;}
 .leak-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:8px;}
 .leak-card{border-radius:var(--radius);padding:14px 16px;cursor:pointer;transition:transform .1s,box-shadow .15s;}
@@ -419,8 +442,19 @@ body.is-mobile #zoom-controls .fsel{max-width:140px;}
         </div>
         <div class="rem-projection" id="rem-projection"></div>
       </div>
+
+      <!-- ══ SPENDING LAYERS ══ -->
+      <div class="layers-wrap" id="layers-wrap" style="display:none">
+        <div class="layers-hero">
+          <div class="lh-label">🎯 Controllable this month</div>
+          <div class="lh-amount" id="lh-controllable">—</div>
+          <div class="lh-sub">Variable + Lifestyle — the part you can actually work on (Fixed is locked)</div>
+        </div>
+        <div class="layers-cards" id="layers-cards"></div>
+      </div>
+
       <div class="budget-header">
-        <h3>💵 Budget by Category <span style="font-size:10px;color:var(--muted);font-weight:400">(current month · click card to view transactions)</span></h3>
+        <h3>💵 Budget by Category <span style="font-size:10px;color:var(--muted);font-weight:400">(current month · click card to view transactions)</span><span id="budget-filter-lbl" style="font-size:10px;color:var(--accent);font-weight:700"></span></h3>
         <button class="btn btn-primary" onclick="saveBudgets()" id="save-budget-btn">💾 Save Budgets</button>
       </div>
       <div class="budget-panel"><div class="budget-grid" id="budget-grid"></div></div>
@@ -908,11 +942,60 @@ window.addEventListener("resize", function(){
 });
 
 // ── Budget ────────────────────────────────────────────────────
+// ── Spending Layers (Fixed / Variable / Lifestyle) ──────────────
+var LAYER_META={
+  Fixed:    {icon:"🔒",label:"Fixed",    tag:"LOCKED",   color:"var(--muted)"},
+  Variable: {icon:"🛒",label:"Variable", tag:"NEEDS",    color:"var(--orange)"},
+  Lifestyle:{icon:"🎉",label:"Lifestyle",tag:"LIFESTYLE",color:"var(--purple)"}
+};
+var activeLayer=null;
+var catLayerMap={};
+
+function renderLayersPanel(layerData){
+  const wrap=document.getElementById("layers-wrap");
+  if(!layerData){wrap.style.display="none";activeLayer=null;return;}
+  wrap.style.display="block";
+
+  catLayerMap={};
+  ["Fixed","Variable","Lifestyle"].forEach(function(k){
+    (layerData[k].cats||[]).forEach(function(c){catLayerMap[c.cat]=k;});
+  });
+
+  document.getElementById("lh-controllable").textContent=fmtFull(layerData.controllable||0);
+  const total=layerData.totalSpent||0;
+
+  document.getElementById("layers-cards").innerHTML=["Fixed","Variable","Lifestyle"].map(function(k){
+    const L=layerData[k],m=LAYER_META[k];
+    const pctTotal=total>0?Math.round((L.spent/total)*100):0;
+    const cls="layer-card layer-"+k.toLowerCase()+(activeLayer===k?" active":"")+(k==="Fixed"?" locked":"");
+    const sub=L.budget>0?("of "+fmtFull(L.budget)+" budget"):(L.cats.length+" categories");
+    return '<div class="'+cls+'" data-layer="'+k+'">'+
+      '<div class="lc-top"><span class="lc-icon">'+m.icon+'</span><span class="lc-name">'+m.label+'</span><span class="lc-tag">'+m.tag+'</span></div>'+
+      '<div class="lc-amount">'+fmtFull(L.spent)+'</div>'+
+      '<div class="lc-bar-bg"><div class="lc-bar-fill" style="width:'+pctTotal+'%;background:'+m.color+'"></div></div>'+
+      '<div class="lc-sub"><span>'+pctTotal+'% of spend</span><span>'+sub+'</span></div>'+
+    '</div>';
+  }).join("");
+}
+
+function selectLayer(layer){
+  activeLayer=(activeLayer===layer)?null:layer;
+  if(allData){
+    renderLayersPanel(allData.layerData);
+    renderBudgetPanel(allData.budgetData);
+  }
+  var fl=document.getElementById("budget-filter-lbl");
+  if(fl)fl.textContent=activeLayer?("  ·  filtered: "+activeLayer):"";
+}
+
 function renderBudgetPanel(budgetData){
   const grid=document.getElementById("budget-grid");
   if(!budgetData||budgetData.length===0){grid.innerHTML='<div style="grid-column:1/-1;padding:40px;text-align:center;color:var(--muted)">No budgets set.<br><br>Go to menu <strong>💰 Budget Importer → 💵 Setup Budget Sheet</strong>.</div>';return;}
   const mk=allData?allData.currentMonthKey:"";
-  grid.innerHTML=budgetData.map(function(item){
+  let rows=budgetData;
+  if(activeLayer)rows=budgetData.filter(function(item){return catLayerMap[item.cat]===activeLayer;});
+  if(rows.length===0){grid.innerHTML='<div style="grid-column:1/-1;padding:30px;text-align:center;color:var(--muted)">No budgeted categories in <strong>'+activeLayer+'</strong>.<br><br>Set a budget for these categories, or click the layer card again to show all.</div>';return;}
+  grid.innerHTML=rows.map(function(item){
     const pct=Math.min(item.pct,100);
     const barColor=item.status==="over"?"var(--red)":item.status==="warning"?"var(--yellow)":"var(--green)";
     const stClass=item.status==="over"?"st-over":item.status==="warning"?"st-warning":item.budget>0?"st-ok":"st-none";
@@ -1030,6 +1113,8 @@ document.addEventListener("DOMContentLoaded",function(){
     var sugg=e.target.closest(".sugg-btn");
     if(sugg){e.stopPropagation();applySuggestion(sugg);return;}
     if(e.target.closest(".suggestion-bar")){e.stopPropagation();return;}
+    var lyr=e.target.closest("[data-layer]");
+    if(lyr){selectLayer(lyr.getAttribute("data-layer"));return;}
     var el=e.target.closest("[data-drill-cat]");
     if(el&&!e.target.closest(".bcard-edit")&&!e.target.closest(".budget-input")){
       openDrill(el.getAttribute("data-drill-cat"),el.getAttribute("data-drill-mk")||"",parseInt(el.getAttribute("data-drill-w"))||0);
@@ -1321,6 +1406,7 @@ function renderDashboard(data){
 
   _doUpdateRemaining();
   renderAllCharts();
+  renderLayersPanel(data.layerData);
   renderBudgetPanel(data.budgetData);
   renderLeaksPanel(data.leaks);
   setTimeout(warmTxCacheForCurrentViews, 250);
